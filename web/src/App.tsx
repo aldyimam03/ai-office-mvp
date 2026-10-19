@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { Canvas } from "@react-three/fiber";
+import { useEffect, useRef, useState } from "react";
+import { Canvas, useFrame } from "@react-three/fiber";
+import type { Group } from "three";
 import { OrbitControls, ContactShadows, Environment, Text } from "@react-three/drei";
 
 type Agent = { id: string; name: string; role: string; agencySlug: string; personality: string; catchphrase: string; specialty: string; color: string; state: string; taskId?: string };
@@ -8,6 +9,9 @@ type Approval = { id: string; taskId: string; summary: string; action?: { tool: 
 type Analysis = { taskId: string; provider: string; mode: string; analysis: string };
 type Event = { id: string; type: string; createdAt: string; taskId?: string };
 const API = import.meta.env.VITE_API_URL as string;
+const stateLabels: Record<string, string> = { idle: "siaga", working: "bekerja", waiting_approval: "menunggu persetujuan", offline: "offline" };
+const taskStateLabels: Record<string, string> = { queued: "menunggu", in_progress: "dikerjakan", waiting_approval: "menunggu persetujuan", completed: "selesai", failed: "gagal", cancelled: "dibatalkan" };
+const specialistLabels: Record<string, string> = { "senior-project-manager": "project manager", "backend-architect": "backend architect", "frontend-developer": "frontend developer", "ui-designer": "UI/UX designer", "code-reviewer": "code reviewer" };
 if (!API) throw new Error("VITE_API_URL wajib diisi");
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -18,7 +22,14 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
 
 function Desk({ position, agent }: { position: [number, number, number]; agent: Agent }) {
   const active = agent.state === "working";
-  return <group position={position}>
+  const group = useRef<Group>(null);
+  useFrame(({ clock }) => {
+    if (!group.current) return;
+    const pulse = active ? Math.sin(clock.elapsedTime * 6) * 0.035 : 0;
+    group.current.position.y = pulse;
+    group.current.rotation.y = active ? Math.sin(clock.elapsedTime * 3) * 0.035 : 0;
+  });
+  return <group ref={group} position={position}>
     <mesh position={[0, 0.55, 0]} castShadow>
       <boxGeometry args={[1.6, 0.12, 0.9]} />
       <meshStandardMaterial color={active ? "#2f8f83" : "#9b7653"} />
@@ -44,7 +55,7 @@ function Desk({ position, agent }: { position: [number, number, number]; agent: 
       <meshStandardMaterial color="#d7aa87" />
     </mesh>
     <Text position={[0, 1.5, 0]} fontSize={0.13} color="#e7edf5" anchorX="center" maxWidth={2}>{agent.name}</Text>
-    <Text position={[0, 1.32, 0]} fontSize={0.095} color={active ? "#73e0ca" : "#aab7c8"} anchorX="center">{agent.state.replace("_", " ")}</Text>
+    <Text position={[0, 1.32, 0]} fontSize={0.095} color={active ? "#73e0ca" : "#aab7c8"} anchorX="center">{stateLabels[agent.state] ?? agent.state}</Text>
   </group>;
 }
 
@@ -82,7 +93,7 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [specialist, setSpecialist] = useState("backend");
+  const [specialist, setSpecialist] = useState("backend-architect");
 
   async function refresh() {
     try {
@@ -124,6 +135,11 @@ export default function App() {
     try { await api(`${API}/tasks/${id}`, { method: "DELETE" }); await refresh(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Tugas gagal dibatalkan"); }
   }
+  async function demoRun(task: Task) {
+    setError("");
+    try { await api(`${API}/tasks/${task.id}/demo-run`, { method: "POST" }); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Demo agent gagal dijalankan"); }
+  }
   async function analyzeTask(task: Task) {
     setAnalyzing(task.id); setError("");
     try { setAnalysis(await api<Analysis>(`${API}/tasks/${task.id}/analyze`, { method: "POST" })); }
@@ -162,14 +178,14 @@ export default function App() {
         <form className="task-form" onSubmit={createTask}>
           <label>Judul tugas<input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Contoh: Tinjau arsitektur API Laravel" required minLength={3} /></label>
           <label>Ringkasan / hasil yang diharapkan<textarea value={description} onChange={e=>setDescription(e.target.value)} placeholder="Apa yang harus dihasilkan agen?" rows={3} /></label>
-          <label>Spesialis awal<select value={specialist} onChange={e=>setSpecialist(e.target.value)}><option value="manager">Manajer Kantor</option><option value="backend">Arsitek Backend</option><option value="frontend">Pengembang Frontend</option><option value="designer">Desainer UI/UX</option><option value="reviewer">Peninjau Kode</option></select></label>
+          <label>Spesialis awal<select value={specialist} onChange={e=>setSpecialist(e.target.value)}><option value="senior-project-manager">project manager</option><option value="backend-architect">backend architect</option><option value="frontend-developer">frontend developer</option><option value="ui-designer">UI/UX designer</option><option value="code-reviewer">code reviewer</option></select></label>
           <button type="submit" disabled={submitting}>{submitting ? "Menambahkan…" : "Tambah ke antrean"} <span>↗</span></button>
         </form>
       </div>
       <div className="panel">
         <div className="panel-heading"><div><h2>Antrean tugas</h2><p>Tugas dan alur persetujuan demo</p></div></div>
         <div className="task-list">{tasks.length === 0 && <p className="empty">Belum ada tugas. Tambahkan tugas pertama.</p>}
-          {tasks.map(t=><div className="task-card" key={t.id}><div className="task-title"><b>{t.title}</b><span className={`task-state ${t.state}`}>{({ queued: "menunggu", in_progress: "dikerjakan", waiting_approval: "menunggu persetujuan", completed: "selesai", failed: "gagal", cancelled: "dibatalkan" } as Record<string, string>)[t.state] ?? t.state}</span></div><p>{t.description || "Tidak ada ringkasan."}</p><small>Spesialis: {t.specialist}</small>{t.state === "queued" && <><button className="secondary" onClick={()=>analyzeTask(t)} disabled={analyzing === t.id}>{analyzing === t.id ? "Meminta analisis Hermes…" : "Analisis dengan Hermes"}</button><button className="secondary" onClick={()=>createApproval(t)}>Simulasikan permintaan persetujuan</button><button className="secondary cancel" onClick={()=>cancelTask(t.id)}>Batalkan tugas</button></>}</div>)}
+          {tasks.map(t=><div className="task-card" key={t.id}><div className="task-title"><b>{t.title}</b><span className={`task-state ${t.state}`}>{taskStateLabels[t.state] ?? t.state}</span></div><p>{t.description || "Tidak ada ringkasan."}</p><small>Spesialis: {specialistLabels[t.specialist] ?? t.specialist}</small>{t.state === "queued" && <><button className="secondary demo" onClick={()=>demoRun(t)}>Jalankan demo agent</button><button className="secondary" onClick={()=>analyzeTask(t)} disabled={analyzing === t.id}>{analyzing === t.id ? "Meminta analisis Hermes…" : "Analisis dengan Hermes"}</button><button className="secondary" onClick={()=>createApproval(t)}>Simulasikan permintaan persetujuan</button><button className="secondary cancel" onClick={()=>cancelTask(t.id)}>Batalkan tugas</button></>}</div>)}
         </div>
         <div className="approval-heading"><h3>Kotak masuk persetujuan</h3><span>{approvals.length} menunggu</span></div>
         {approvals.map(a=><div className="approval-card" key={a.id}><p>{a.summary}</p><div><button className="approve" onClick={()=>decide(a.id,"approved")}>Setujui</button><button className="reject" onClick={()=>decide(a.id,"rejected")}>Tolak</button></div></div>)}

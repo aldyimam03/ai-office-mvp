@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { app } from "./index.js";
+import { buildTaskPrompt } from "./hermes.js";
 
 let baseUrl = "";
 let server: ReturnType<typeof app.listen>;
@@ -19,6 +20,25 @@ async function request(path: string, init?: RequestInit) {
   const response = await fetch(`${baseUrl}${path}`, init);
   return { response, body: await response.json() };
 }
+
+test("builds a read-only Agency Agents prompt", () => {
+  const prompt = buildTaskPrompt({ title: "Audit API", description: "Cari risiko", specialist: "backend-architect" });
+  assert.match(prompt, /backend-architect/);
+  assert.match(prompt, /Jangan menjalankan perintah/);
+  assert.match(prompt, /rencana singkat/);
+});
+
+test("runs a task through the demo workflow", async () => {
+  const created = await request("/api/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Demo agent workflow", specialist: "frontend-developer" }) });
+  const started = await request(`/api/tasks/${created.body.id}/demo-run`, { method: "POST" });
+  assert.equal(started.response.status, 202);
+  assert.equal(started.body.state, "in_progress");
+  const agents = await request("/api/agents");
+  assert.equal(agents.body.find((agent: { agencySlug: string }) => agent.agencySlug === "frontend-developer").state, "working");
+  await new Promise(resolve => setTimeout(resolve, 8100));
+  const finished = await request(`/api/tasks/${created.body.id}`);
+  assert.equal(finished.body.state, "completed");
+});
 
 test("rejects duplicate pending approval for one task", async () => {
   const created = await request("/api/tasks", {

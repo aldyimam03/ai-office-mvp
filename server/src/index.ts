@@ -36,11 +36,11 @@ type Agent = {
 
 // Character layer maps visible employees to Agency Agents specialists.
 const agents: Agent[] = [
-  { id: "manager", name: "Mara Sol", role: "Manajer Kantor", agencySlug: "project-manager", personality: "tenang, tegas, menjaga pekerjaan tetap bergerak", catchphrase: "Satu langkah berikutnya yang jelas.", specialty: "mengubah tujuan yang kacau menjadi antrean kerja", color: "#e8b86c", state: "idle" },
-  { id: "backend", name: "Bram Forge", role: "Arsitek Backend", agencySlug: "backend-architect", personality: "metodis, defensif, terobsesi pada batas sistem", catchphrase: "Buat kegagalan jadi biasa.", specialty: "API, kontrak data, dan layanan andal", color: "#6fa8dc", state: "idle" },
-  { id: "frontend", name: "Nia Pixel", role: "Pengembang Frontend", agencySlug: "frontend-developer", personality: "presisi, cepat, mengutamakan pengguna", catchphrase: "Kalau terasa lambat, berarti lambat.", specialty: "antarmuka React responsif dan alur aksesibel", color: "#72d6c1", state: "idle" },
-  { id: "designer", name: "Luma Vale", role: "Desainer UI/UX", agencySlug: "ui-ux-designer", personality: "ingin tahu, hangat, tegas soal kejelasan", catchphrase: "Hapus satu hal lagi.", specialty: "sistem visual, interaksi, dan kejelasan produk", color: "#c59be8", state: "idle" },
-  { id: "reviewer", name: "Vera Check", role: "Peninjau Kode", agencySlug: "code-reviewer", personality: "baik, skeptis, berbasis bukti", catchphrase: "Tunjukkan kasus tepinya.", specialty: "menemukan risiko, menjaga kualitas, dan keyakinan rilis", color: "#f28f8f", state: "idle" },
+  { id: "manager", name: "Mara Sol", role: "project manager", agencySlug: "senior-project-manager", personality: "tenang, tegas, menjaga pekerjaan tetap bergerak", catchphrase: "Satu langkah berikutnya yang jelas.", specialty: "mengubah tujuan yang kacau menjadi antrean kerja", color: "#e8b86c", state: "idle" },
+  { id: "backend", name: "Bram Forge", role: "backend architect", agencySlug: "backend-architect", personality: "metodis, defensif, terobsesi pada batas sistem", catchphrase: "Buat kegagalan jadi biasa.", specialty: "API, kontrak data, dan layanan andal", color: "#6fa8dc", state: "idle" },
+  { id: "frontend", name: "Nia Pixel", role: "frontend developer", agencySlug: "frontend-developer", personality: "presisi, cepat, mengutamakan pengguna", catchphrase: "Kalau terasa lambat, berarti lambat.", specialty: "antarmuka React responsif dan alur aksesibel", color: "#72d6c1", state: "idle" },
+  { id: "designer", name: "Luma Vale", role: "UI/UX designer", agencySlug: "ui-designer", personality: "ingin tahu, hangat, tegas soal kejelasan", catchphrase: "Hapus satu hal lagi.", specialty: "sistem visual, interaksi, dan kejelasan produk", color: "#c59be8", state: "idle" },
+  { id: "reviewer", name: "Vera Check", role: "code reviewer", agencySlug: "code-reviewer", personality: "baik, skeptis, berbasis bukti", catchphrase: "Tunjukkan kasus tepinya.", specialty: "menemukan risiko, menjaga kualitas, dan keyakinan rilis", color: "#f28f8f", state: "idle" },
 ];
 
 app.get("/api/health", async (_req, res) => res.json({ ok: true, service: "ai-office-server", persistence: "sqlite", hermes: await hermesStatus() }));
@@ -88,6 +88,25 @@ app.post("/api/tasks", (req, res) => {
   const task = insertTask({ id: randomUUID(), ...parsed.data, state: "queued", createdAt: new Date().toISOString() });
   record("task.created", task.id, { title: task.title, specialist: task.specialist });
   res.status(201).json(task);
+});
+
+app.post("/api/tasks/:id/demo-run", (req, res) => {
+  const task = getTask(req.params.id);
+  const agent = agents.find(item => item.agencySlug === task?.specialist);
+  if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" });
+  if (!agent) return res.status(400).json({ error: "Specialist Agency Agents tidak ditemukan" });
+  if (task.state !== "queued") return res.status(409).json({ error: "Hanya tugas menunggu yang dapat dijalankan" });
+  agent.state = "working";
+  agent.taskId = task.id;
+  const started = updateTask(task.id, "in_progress");
+  record("task.demo_started", task.id, { specialist: agent.agencySlug });
+  setTimeout(() => {
+    agent.state = "idle";
+    delete agent.taskId;
+    updateTask(task.id, "completed");
+    record("task.demo_completed", task.id, { specialist: agent.agencySlug });
+  }, 8000);
+  res.status(202).json(started);
 });
 
 // Demonstration only: create a proposed action that requires human review.

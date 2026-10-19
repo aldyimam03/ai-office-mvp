@@ -47,9 +47,15 @@ Buka URL Vite yang tampil di terminal frontend.
 - Jangan membuka backend ke LAN atau internet sebelum eksekusi alat memiliki autentikasi dan daftar izin.
 - Nilai rahasia harus disimpan di `.env`, bukan di source code. Jangan masukkan secret ke `VITE_*`.
 
+## Status Implementasi
+- CLI Hermes terverifikasi: `v0.22.2`.
+- Plugin `agency-agents-router` terpasang, aktif, dan lulus `hermes plugins doctor`.
+- Roster memakai slug Agency Agents yang valid: `senior-project-manager`, `backend-architect`, `frontend-developer`, `ui-designer`, dan `code-reviewer`.
+- Adapter Hermes tetap read-only, memakai `execFile` dan `--safe-mode`.
+
 ## Tahap Implementasi Berikutnya
-1. Jalankan perintah penemuan PowerShell dari rencana implementasi.
-2. Verifikasi CLI Hermes dan HERMES_HOME tanpa mengasumsikan lokasi konfigurasi.
-3. Verifikasi alat Agency Agents Router di dalam Hermes.
-4. Sempurnakan adapter Hermes sesuai versi yang terpasang.
-5. Tambahkan autentikasi, log audit, dan kebijakan daftar izin sebelum mengaktifkan eksekusi otonom.
+1. Tambahkan autentikasi pengguna dan session management.
+2. Perketat audit log agar payload sensitif tidak tersimpan.
+3. Tambahkan allowlist tool sebelum mengaktifkan eksekusi otonom.
+4. Tambahkan integrasi knowledge base dengan sitasi di UI.
+5. Pecah bundle frontend besar dengan `manualChunks` atau lazy loading.
