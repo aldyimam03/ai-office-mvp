@@ -1,0 +1,14 @@
+# Secrets and local runtime state
+.env
+.env.*
+!.env.example
+server/.env
+web/.env
+
+# Generated output
+node_modules/
+dist/
+*.tsbuildinfo
+server/data/*.sqlite
+server/data/*.sqlite-shm
+server/data/*.sqlite-wal
