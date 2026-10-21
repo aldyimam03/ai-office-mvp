@@ -1,11 +1,11 @@
 export type AgentState = "idle" | "working" | "in_meeting" | "done" | "failed";
 
 export interface OfficeEvent {
-  id: number;
+  id: string;
+  taskId?: string | null;
   type: string;
-  task_id: string | null;
   payload: any;
-  created_at: string;
+  createdAt: string;
 }
 
 export function deriveAgentStates(events: OfficeEvent[]): Record<string, AgentState> {
@@ -42,7 +42,7 @@ export function isMeetingActive(events: OfficeEvent[]): { active: boolean; topic
   const lastEnd = [...events].reverse().find((e) => e.type === "meeting.ended");
   if (!lastStart) return { active: false, topic: "" };
   if (!lastEnd) return { active: true, topic: lastStart.payload?.topic ?? "rapat" };
-  return new Date(lastStart.created_at) > new Date(lastEnd.created_at)
+  return new Date(lastStart.createdAt) > new Date(lastEnd.createdAt)
     ? { active: true, topic: lastStart.payload?.topic ?? "rapat" }
     : { active: false, topic: "" };
 }
