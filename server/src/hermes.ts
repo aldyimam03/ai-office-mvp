@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const HERMES_TIMEOUT = Number(process.env.HERMES_TIMEOUT_MS ?? 300_000);
+const HERMES_MAX_BUFFER = 4 * 1024 * 1024;
 
 export type HermesStatus = { configured: boolean; executable: string | null; mode: "read-only" | "not-configured" };
 
@@ -21,7 +23,30 @@ export async function askReadOnly(prompt: string): Promise<string> {
   const executable = process.env.HERMES_BIN ?? "hermes";
   const args = ["-z", prompt, "--safe-mode"];
   if (process.env.HERMES_MODEL) args.push("--model", process.env.HERMES_MODEL);
-  const result = await execFileAsync(executable, args, { timeout: 120000, windowsHide: true, maxBuffer: 1024 * 1024 });
+  const result = await execFileAsync(executable, args, {
+    timeout: HERMES_TIMEOUT,
+    maxBuffer: HERMES_MAX_BUFFER,
+    windowsHide: true,
+  });
+  return result.stdout.trim();
+}
+
+export async function delegateTask(slug: string, task: string): Promise<string> {
+  const prompt = [
+    "Use the agency-agents-router plugin.",
+    `Delegate to specialist slug: ${slug}.`,
+    `Task: ${task}`,
+    "Return only the delegate result, tanpa preamble.",
+  ].join("\n");
+
+  const executable = process.env.HERMES_BIN ?? "hermes";
+  const args = ["-z", prompt];
+  if (process.env.HERMES_MODEL) args.push("--model", process.env.HERMES_MODEL);
+  const result = await execFileAsync(executable, args, {
+    timeout: HERMES_TIMEOUT,
+    maxBuffer: HERMES_MAX_BUFFER,
+    windowsHide: true,
+  });
   return result.stdout.trim();
 }
 
@@ -33,5 +58,5 @@ export function buildTaskPrompt(task: { title: string; description: string; spec
     `Slug spesialis Agency Agents: ${task.specialist}`,
     `Judul: ${task.title}`,
     `Deskripsi: ${task.description || "(tidak ada)"}`,
-  ].join("\\n");
+  ].join("\n");
 }

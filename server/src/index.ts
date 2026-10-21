@@ -4,7 +4,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { ActionRequest } from "./actions.js";
-import { askReadOnly, buildTaskPrompt, hermesStatus } from "./hermes.js";
+import { askReadOnly, buildTaskPrompt, delegateTask, hermesStatus } from "./hermes.js";
 import { addDocument, searchDocuments } from "./knowledge.js";
 import { addEvent, decideApproval, getApproval, getTask, hasPendingApproval, insertApproval, insertTask, listEvents, listPendingApprovals, listTasks, updateTask } from "./db.js";
 
@@ -48,6 +48,113 @@ app.get("/api/agents", (_req, res) => res.json(agents));
 app.get("/api/tasks", (_req, res) => res.json(listTasks()));
 app.get("/api/tasks/:id", (req, res) => { const task = getTask(req.params.id); if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" }); res.json(task); });
 app.get("/api/tasks/:id/events", (req, res) => res.json(listEvents(req.params.id)));
+
+const ALLOWED_SLUGS = [
+  "senior-project-manager",
+  "backend-architect",
+  "frontend-developer",
+  "ui-designer",
+  "code-reviewer",
+  "copywriter",
+  "seo-specialist",
+];
+
+app.post("/api/tasks/:id/orchestrate", (req, res) => {
+  const task = getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" });
+
+  void (async () => {
+    const planPrompt = `
+Kamu adalah senior project manager. Pecah tugas berikut menjadi subtugas.
+Setiap subtugas harus punya "slug" dari daftar ini:
+${ALLOWED_SLUGS.join(", ")}.
+
+Kembalikan HANYA JSON valid, tanpa markdown:
+{
+  "subtasks": [
+    { "slug": "frontend-developer", "task": "deskripsi tugas konkret" }
+  ],
+  "meeting": { "needed": true, "topic": "topik diskusi" }
+}
+
+Judul: ${task.title}
+Deskripsi: ${task.description}
+  `.trim();
+
+    try {
+      const raw = await askReadOnly(planPrompt);
+      const plan: {
+        subtasks: { slug: string; task: string }[];
+        meeting?: { needed: boolean; topic: string };
+      } = JSON.parse(raw.replace(/```json|```/g, "").trim());
+
+      const invalid = plan.subtasks.filter((sub) => !ALLOWED_SLUGS.includes(sub.slug));
+      if (invalid.length > 0) {
+        updateTask(task.id, "failed", "Slug tidak valid");
+        record("task.failed", task.id, { error: "Slug tidak valid", invalid });
+        return;
+      }
+
+      record("orchestration.started", task.id, { plan });
+      const results: { subtaskId: string; slug: string; result?: string; error?: string }[] = [];
+
+      for (const sub of plan.subtasks) {
+        const subtaskId = randomUUID();
+        insertTask({
+          id: subtaskId,
+          title: sub.task,
+          description: sub.task,
+          specialist: sub.slug,
+          parentTaskId: task.id,
+          state: "queued",
+          createdAt: new Date().toISOString(),
+        });
+        record("task.delegated", subtaskId, { parentTaskId: task.id, specialist: sub.slug });
+        updateTask(subtaskId, "in_progress");
+
+        try {
+          const result = await delegateTask(sub.slug, sub.task);
+          updateTask(subtaskId, "completed");
+          record("task.completed", subtaskId, { specialist: sub.slug, result });
+          results.push({ subtaskId, slug: sub.slug, result });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "unknown";
+          updateTask(subtaskId, "failed", message);
+          record("task.failed", subtaskId, { specialist: sub.slug, error: message });
+          results.push({ subtaskId, slug: sub.slug, error: message });
+        }
+      }
+
+      if (plan.meeting?.needed) {
+        record("meeting.started", task.id, {
+          topic: plan.meeting.topic,
+          participants: plan.subtasks.map((sub) => sub.slug),
+        });
+      }
+
+      record("orchestration.completed", task.id, { results });
+      updateTask(task.id, "completed");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "unknown";
+      updateTask(task.id, "failed", message);
+      record("orchestration.failed", task.id, { error: message });
+      record("task.failed", task.id, { error: message });
+    }
+  })();
+
+  res.status(202).json({ ok: true, message: "Orkestrasi dimulai di background" });
+});
+
+app.post("/api/tasks/:id/meeting/end", (req, res) => {
+  const task = getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" });
+
+  record("meeting.ended", task.id, {
+    topic: req.body.topic ?? "rapat",
+  });
+  res.json({ ok: true });
+});
+
 app.post("/api/tasks/:id/analyze", async (req, res) => {
   const task = getTask(req.params.id);
   if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" });
@@ -61,6 +168,16 @@ app.post("/api/tasks/:id/analyze", async (req, res) => {
   }
 });
 app.get("/api/events", (_req, res) => res.json(listEvents()));
+app.post("/api/events/meeting/start", (req, res) => {
+  const parsed = z.object({
+    topic: z.string().trim().min(1).max(200),
+    participants: z.array(z.string().trim().min(1).max(100)).max(20),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid meeting event", details: parsed.error.flatten() });
+
+  record("meeting.started", undefined, parsed.data);
+  res.status(200).json({ ok: true });
+});
 app.get("/api/approvals", (_req, res) => res.json(listPendingApprovals()));
 app.get("/api/knowledge/search", (req, res) => {
   const query = z.string().trim().min(2).max(200).safeParse(req.query.q);
