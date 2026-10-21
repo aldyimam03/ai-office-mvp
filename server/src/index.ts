@@ -7,7 +7,7 @@ import { ActionRequest } from "./actions.js";
 import { askReadOnly, buildTaskPrompt, delegateTask, hermesStatus } from "./hermes.js";
 import { addDocument, searchDocuments } from "./knowledge.js";
 import { listProjects, projectDir, readProject, workspaceRoot } from "./projects.js";
-import { addEvent, decideApproval, getApproval, getTask, hasPendingApproval, insertApproval, insertTask, listEvents, listPendingApprovals, listTasks, updateTask } from "./db.js";
+import { addEvent, decideApproval, failInterruptedTasks, getApproval, getTask, hasPendingApproval, insertApproval, insertTask, listEvents, listPendingApprovals, listTasks, updateTask } from "./db.js";
 
 export const app = express();
 const host = process.env.HOST ?? "127.0.0.1";
@@ -60,6 +60,24 @@ const ALLOWED_SLUGS = [
   "seo-specialist",
 ];
 
+// Satu subtugas = satu delegasi Hermes di folder project induk. Dipakai orkestrasi
+// dan tombol "Coba lagi" supaya jalur sukses/gagal tidak terduplikasi.
+async function delegateSubtask(subtaskId: string, slug: string, description: string, projectTaskId: string) {
+  updateTask(subtaskId, "in_progress");
+  try {
+    const existing = readProject(projectTaskId)?.files.map(file => file.path) ?? [];
+    const result = await delegateTask(slug, description, projectDir(projectTaskId), existing);
+    updateTask(subtaskId, "completed");
+    record("task.completed", subtaskId, { specialist: slug, result });
+    return { subtaskId, slug, result };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown";
+    updateTask(subtaskId, "failed", message);
+    record("task.failed", subtaskId, { specialist: slug, error: message });
+    return { subtaskId, slug, error: message };
+  }
+}
+
 app.post("/api/tasks/:id/orchestrate", (req, res) => {
   const task = getTask(req.params.id);
   if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" });
@@ -97,7 +115,6 @@ Deskripsi: ${task.description}
       }
 
       record("orchestration.started", task.id, { plan });
-      const dir = projectDir(task.id);
       const results: { subtaskId: string; slug: string; result?: string; error?: string }[] = [];
 
       for (const sub of plan.subtasks) {
@@ -112,20 +129,7 @@ Deskripsi: ${task.description}
           createdAt: new Date().toISOString(),
         });
         record("task.delegated", subtaskId, { parentTaskId: task.id, specialist: sub.slug });
-        updateTask(subtaskId, "in_progress");
-
-        try {
-          const existing = readProject(task.id)?.files.map(file => file.path) ?? [];
-          const result = await delegateTask(sub.slug, sub.task, dir, existing);
-          updateTask(subtaskId, "completed");
-          record("task.completed", subtaskId, { specialist: sub.slug, result });
-          results.push({ subtaskId, slug: sub.slug, result });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : "unknown";
-          updateTask(subtaskId, "failed", message);
-          record("task.failed", subtaskId, { specialist: sub.slug, error: message });
-          results.push({ subtaskId, slug: sub.slug, error: message });
-        }
+        results.push(await delegateSubtask(subtaskId, sub.slug, sub.task, task.id));
       }
 
       if (plan.meeting?.needed) {
@@ -133,6 +137,9 @@ Deskripsi: ${task.description}
           topic: plan.meeting.topic,
           participants: plan.subtasks.map((sub) => sub.slug),
         });
+        // Rapat dianggap selesai di akhir orkestrasi; tanpa ini UI menampilkan
+        // agen "berdiskusi" selamanya walau semua langkah sudah selesai/gagal.
+        record("meeting.ended", task.id, { topic: plan.meeting.topic });
       }
 
       record("orchestration.completed", task.id, { results, projectUrl: `/projects/${task.id}/` });
@@ -253,7 +260,14 @@ app.post("/api/tasks/:id/retry", (req, res) => {
   if (task.state !== "failed") return res.status(409).json({ error: "Hanya tugas gagal yang dapat diulang" });
   const retried = updateTask(task.id, "queued");
   record("task.retried", task.id, { attempts: retried?.attempts ?? 0 });
-  res.json(retried);
+
+  // Subtugas diulang langsung oleh spesialis yang sama; task induk hanya kembali ke antrean
+  // karena perencanaannya harus dijalankan ulang lewat /orchestrate.
+  if (!task.parentTaskId) return res.json(retried);
+  const parentTaskId = task.parentTaskId;
+  const description = task.description || task.title;
+  void delegateSubtask(task.id, task.specialist, description, parentTaskId);
+  return res.status(202).json(retried);
 });
 
 app.post("/api/tasks/:id/request-approval", (req, res) => {
@@ -282,6 +296,8 @@ app.post("/api/approvals/:id/decision", (req, res) => {
 });
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const interrupted = failInterruptedTasks();
+  if (interrupted > 0) console.log(`[ai-office] ${interrupted} subtugas ditandai gagal: server restart saat masih berjalan`);
   app.listen(port, host, () => {
     console.log(`AI Office API listening on http://${host}:${port}`);
   });

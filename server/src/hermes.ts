@@ -5,6 +5,24 @@ const execFileAsync = promisify(execFile);
 const HERMES_TIMEOUT = Number(process.env.HERMES_TIMEOUT_MS ?? 900_000);
 const HERMES_MAX_BUFFER = 4 * 1024 * 1024;
 
+type ExecFailure = Error & { code?: number | string; signal?: string; killed?: boolean; stderr?: string; stdout?: string };
+
+// execFile hanya memberi "Command failed: hermes -z <prompt>"; stderr asli harus diselipkan
+// supaya panel bisa menampilkan sebab kegagalan yang sebenarnya.
+function explainFailure(what: string, error: unknown): Error {
+  const e = error as ExecFailure;
+  const lines = [`${what} gagal`];
+  if (e.killed) lines.push(`timeout ${HERMES_TIMEOUT} ms`);
+  if (e.code !== undefined) lines.push(`exit ${String(e.code)}`);
+  if (typeof e.signal === "string" && e.signal) lines.push(`signal ${e.signal}`);
+  const stderr = e.stderr?.trim();
+  const stdout = e.stdout?.trim();
+  if (stderr) lines.push(`stderr:\n${stderr.slice(-4000)}`);
+  if (stdout) lines.push(`stdout (akhir):\n${stdout.slice(-1500)}`);
+  if (!stderr && !stdout) lines.push(e.message);
+  return new Error(lines.join("\n"));
+}
+
 export type HermesStatus = { configured: boolean; executable: string | null; mode: "read-only" | "not-configured" };
 
 export async function hermesStatus(): Promise<HermesStatus> {
@@ -23,12 +41,16 @@ export async function askReadOnly(prompt: string): Promise<string> {
   const executable = process.env.HERMES_BIN ?? "hermes";
   const args = ["-z", prompt, "--safe-mode"];
   if (process.env.HERMES_MODEL) args.push("--model", process.env.HERMES_MODEL);
-  const result = await execFileAsync(executable, args, {
-    timeout: HERMES_TIMEOUT,
-    maxBuffer: HERMES_MAX_BUFFER,
-    windowsHide: true,
-  });
-  return result.stdout.trim();
+  try {
+    const result = await execFileAsync(executable, args, {
+      timeout: HERMES_TIMEOUT,
+      maxBuffer: HERMES_MAX_BUFFER,
+      windowsHide: true,
+    });
+    return result.stdout.trim();
+  } catch (error) {
+    throw explainFailure("hermes read-only", error);
+  }
 }
 
 export async function delegateTask(slug: string, task: string, cwd: string, files: string[] = []): Promise<string> {
@@ -48,12 +70,16 @@ export async function delegateTask(slug: string, task: string, cwd: string, file
   // --in wajib: tanpa itu Hermes menulis ke cwd default pemanggil, bukan folder project.
   const args = ["--in", cwd, "-z", prompt];
   if (process.env.HERMES_MODEL) args.push("--model", process.env.HERMES_MODEL);
-  const result = await execFileAsync(executable, args, {
-    timeout: HERMES_TIMEOUT,
-    maxBuffer: HERMES_MAX_BUFFER,
-    windowsHide: true,
-  });
-  return result.stdout.trim();
+  try {
+    const result = await execFileAsync(executable, args, {
+      timeout: HERMES_TIMEOUT,
+      maxBuffer: HERMES_MAX_BUFFER,
+      windowsHide: true,
+    });
+    return result.stdout.trim();
+  } catch (error) {
+    throw explainFailure(`delegate ${slug}`, error);
+  }
 }
 
 export function buildTaskPrompt(task: { title: string; description: string; specialist: string }): string {

@@ -4,7 +4,7 @@ import { join, relative, resolve, sep } from "node:path";
 // Setiap tugas induk punya satu folder project sendiri di bawah root ini.
 export const workspaceRoot = resolve(process.env.AI_OFFICE_WORKSPACE ?? "./workspace");
 
-export type Artifact = { path: string; size: number };
+export type Artifact = { path: string; size: number; mtime: number };
 export type Project = { taskId: string; entry: string | null; files: Artifact[] };
 
 const MAX_FILES = 500;
@@ -17,7 +17,7 @@ function walk(dir: string, base: string, depth: number, out: Artifact[]): Artifa
     const full = join(dir, name);
     const info = statSync(full);
     if (info.isDirectory()) walk(full, base, depth + 1, out);
-    else out.push({ path: relative(base, full).split(sep).join("/"), size: info.size });
+    else out.push({ path: relative(base, full).split(sep).join("/"), size: info.size, mtime: info.mtimeMs });
     if (out.length >= MAX_FILES) break;
   }
   return out;

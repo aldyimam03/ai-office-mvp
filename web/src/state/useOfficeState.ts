@@ -32,6 +32,13 @@ export function deriveAgentStates(events: OfficeEvent[]): Record<string, AgentSt
           if (state[slug] === "in_meeting") state[slug] = "working";
         }
         break;
+      // Orkestrasi selesai/gagal = rapat bubar, walau event meeting.ended tidak pernah tercatat.
+      case "orchestration.completed":
+      case "orchestration.failed":
+        for (const slug of Object.keys(state)) {
+          if (state[slug] === "in_meeting") state[slug] = ev.type === "orchestration.failed" ? "failed" : "done";
+        }
+        break;
     }
   }
   return state;
@@ -39,8 +46,10 @@ export function deriveAgentStates(events: OfficeEvent[]): Record<string, AgentSt
 
 export function isMeetingActive(events: OfficeEvent[]): { active: boolean; topic: string } {
   const lastStart = [...events].reverse().find((e) => e.type === "meeting.started");
-  const lastEnd = [...events].reverse().find((e) => e.type === "meeting.ended");
   if (!lastStart) return { active: false, topic: "" };
+  const lastEnd = [...events]
+    .reverse()
+    .find((e) => e.type === "meeting.ended" || e.type === "orchestration.completed" || e.type === "orchestration.failed");
   if (!lastEnd) return { active: true, topic: lastStart.payload?.topic ?? "rapat" };
   return new Date(lastStart.createdAt) > new Date(lastEnd.createdAt)
     ? { active: true, topic: lastStart.payload?.topic ?? "rapat" }

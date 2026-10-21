@@ -54,3 +54,11 @@ export function insertApproval(input: Omit<Approval, "decidedAt"> & { action?: P
 export function decideApproval(id: string, status: ApprovalStatus): Approval | undefined { db.prepare("UPDATE approvals SET status = ?, decided_at = ? WHERE id = ? AND status = 'pending'").run(status, new Date().toISOString(), id); return getApproval(id); }
 export function addEvent(input: Omit<Event, "createdAt">): Event { const createdAt = new Date().toISOString(); db.prepare("INSERT INTO events (id,task_id,type,payload,created_at) VALUES (?,?,?,?,?)").run(input.id, input.taskId ?? null, input.type, JSON.stringify(input.payload), createdAt); return { ...input, createdAt }; }
 export function listEvents(taskId?: string): Event[] { const rows = taskId ? db.prepare("SELECT * FROM events WHERE task_id = ? ORDER BY created_at ASC").all(taskId) : db.prepare("SELECT * FROM events ORDER BY created_at DESC").all(); return rows.map(row => ({ id: String(row.id), ...(row.task_id ? { taskId: String(row.task_id) } : {}), type: String(row.type), payload: JSON.parse(String(row.payload)), createdAt: String(row.created_at) })); }
+
+// Restart server membunuh promise orchestrator di tengah jalan; tanpa sapuan ini baris
+// in_progress menggantung selamanya karena tidak ada proses yang tersisa untuk menutupnya.
+export function failInterruptedTasks(message = "task terhenti: server di-restart saat subtugas ini berjalan"): number {
+  const result = db.prepare("UPDATE tasks SET state = 'failed', error = ?, updated_at = ? WHERE state = 'in_progress'").run(message, new Date().toISOString());
+  return Number(result.changes);
+}
+
