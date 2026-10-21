@@ -8,6 +8,8 @@ import { deskSpotAt, MEETING_TABLE, ROOM } from "./lib/layout";
 import { deriveAgentStates, isMeetingActive, type AgentState, type OfficeEvent } from "./state/useOfficeState";
 
 const API_URL = import.meta.env.VITE_API_URL;
+// API_URL = http://host:port/api → origin untuk file project hasil agent.
+const PROJECT_BASE = API_URL.replace(/\/api\/?$/, "");
 
 // ============================================================
 // TAMBAHKAN AGEN BARU DI SINI — cukup tambah satu baris di bawah.
@@ -37,6 +39,12 @@ interface OfficeTask {
   parentTaskId?: string;
   error?: string;
   result?: string | null;
+}
+
+interface OfficeProject {
+  taskId: string;
+  entry: string | null;
+  files: { path: string; size: number }[];
 }
 
 // Status backend "in_progress" ditampilkan sebagai "working" agar sesuai bahasa panel.
@@ -301,6 +309,7 @@ function WallClock({ position }: { position: [number, number, number] }) {
 export default function App() {
   const [events, setEvents] = useState<OfficeEvent[]>([]);
   const [tasks, setTasks] = useState<OfficeTask[]>([]);
+  const [projects, setProjects] = useState<OfficeProject[]>([]);
   const [panelOpen, setPanelOpen] = useState(true);
   const [formTitle, setFormTitle] = useState("");
   const [formDescription, setFormDescription] = useState("");
@@ -337,15 +346,30 @@ export default function App() {
     }
   }, []);
 
+  const loadProjects = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_URL}/projects`);
+      const contentType = r.headers.get("content-type") ?? "";
+      if (!r.ok || !contentType.includes("application/json")) {
+        throw new Error(`Projects request failed: ${r.status} ${r.statusText}`);
+      }
+      const data = await r.json();
+      setProjects(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Failed to load office projects", error);
+    }
+  }, []);
+
   useEffect(() => {
     const tick = () => {
       void loadEvents();
       void loadTasks();
+      void loadProjects();
     };
     tick();
     const id = setInterval(tick, 2000);
     return () => clearInterval(id);
-  }, [loadEvents, loadTasks]);
+  }, [loadEvents, loadTasks, loadProjects]);
 
   // Kirim tugas: POST /api/tasks lalu langsung POST /api/tasks/<id>/orchestrate.
   const submitTask = async (event: FormEvent<HTMLFormElement>) => {
@@ -687,6 +711,7 @@ export default function App() {
           )}
           <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
             {tasks.slice(0, 50).map((task) => {
+              const project = projects.find((item) => item.taskId === task.id);
               // Baca payload.result dari event task.completed, ATAU kolom result task,
               // ATAU rangkuman hasil subtask (untuk task induk hasil /orchestrate).
               const ownResult =
@@ -727,6 +752,52 @@ export default function App() {
                   <div style={{ color: "#64748b", fontSize: 10, marginTop: 2 }}>
                     diperbarui {new Date(task.updatedAt).toLocaleTimeString("id-ID")}
                   </div>
+                  {project && project.files.length > 0 && (
+                    <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                      {project.entry ? (
+                        <a
+                          href={`${PROJECT_BASE}/projects/${task.id}/${project.entry}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{
+                            display: "block",
+                            textAlign: "center",
+                            padding: "6px 8px",
+                            borderRadius: 6,
+                            background: "#1d4ed8",
+                            color: "#ffffff",
+                            fontSize: 11,
+                            fontWeight: 700,
+                            textDecoration: "none",
+                          }}
+                        >
+                          Buka project ({project.files.length} file)
+                        </a>
+                      ) : (
+                        <span style={{ color: "#94a3b8", fontSize: 11 }}>
+                          {project.files.length} file, tanpa index.html
+                        </span>
+                      )}
+                      <details>
+                        <summary style={{ cursor: "pointer", color: "#94a3b8", fontSize: 11 }}>Daftar file</summary>
+                        <ul style={{ margin: "4px 0 0", paddingLeft: 16, color: "#cbd5e1", fontSize: 11, lineHeight: 1.5 }}>
+                          {project.files.map((file) => (
+                            <li key={file.path}>
+                              <a
+                                href={`${PROJECT_BASE}/projects/${task.id}/${file.path}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ color: "#93c5fd" }}
+                              >
+                                {file.path}
+                              </a>{" "}
+                              · {(file.size / 1024).toFixed(1)} KB
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    </div>
+                  )}
                   {task.state === "completed" && (
                     <div
                       style={{

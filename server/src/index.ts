@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { ActionRequest } from "./actions.js";
 import { askReadOnly, buildTaskPrompt, delegateTask, hermesStatus } from "./hermes.js";
 import { addDocument, searchDocuments } from "./knowledge.js";
+import { listProjects, projectDir, readProject, workspaceRoot } from "./projects.js";
 import { addEvent, decideApproval, getApproval, getTask, hasPendingApproval, insertApproval, insertTask, listEvents, listPendingApprovals, listTasks, updateTask } from "./db.js";
 
 export const app = express();
@@ -96,6 +97,7 @@ Deskripsi: ${task.description}
       }
 
       record("orchestration.started", task.id, { plan });
+      const dir = projectDir(task.id);
       const results: { subtaskId: string; slug: string; result?: string; error?: string }[] = [];
 
       for (const sub of plan.subtasks) {
@@ -113,7 +115,8 @@ Deskripsi: ${task.description}
         updateTask(subtaskId, "in_progress");
 
         try {
-          const result = await delegateTask(sub.slug, sub.task);
+          const existing = readProject(task.id)?.files.map(file => file.path) ?? [];
+          const result = await delegateTask(sub.slug, sub.task, dir, existing);
           updateTask(subtaskId, "completed");
           record("task.completed", subtaskId, { specialist: sub.slug, result });
           results.push({ subtaskId, slug: sub.slug, result });
@@ -132,7 +135,7 @@ Deskripsi: ${task.description}
         });
       }
 
-      record("orchestration.completed", task.id, { results });
+      record("orchestration.completed", task.id, { results, projectUrl: `/projects/${task.id}/` });
       updateTask(task.id, "completed");
     } catch (err) {
       const message = err instanceof Error ? err.message : "unknown";
@@ -168,6 +171,14 @@ app.post("/api/tasks/:id/analyze", async (req, res) => {
   }
 });
 app.get("/api/events", (_req, res) => res.json(listEvents()));
+app.get("/api/projects", (_req, res) => res.json(listProjects()));
+app.get("/api/projects/:taskId", (req, res) => {
+  const project = readProject(req.params.taskId);
+  if (!project) return res.status(404).json({ error: "Project tidak ditemukan" });
+  res.json(project);
+});
+// Hasil kerja agent bisa langsung dibuka di browser: /projects/<taskId>/
+app.use("/projects", express.static(workspaceRoot, { index: "index.html" }));
 app.post("/api/events/meeting/start", (req, res) => {
   const parsed = z.object({
     topic: z.string().trim().min(1).max(200),

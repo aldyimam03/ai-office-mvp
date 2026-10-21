@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { app } from "./index.js";
 import { buildTaskPrompt } from "./hermes.js";
+import { projectDir } from "./projects.js";
 
 let baseUrl = "";
 let server: ReturnType<typeof app.listen>;
@@ -81,6 +84,18 @@ test("retries failed task and increments attempts", async () => {
 test("analyze endpoint rejects missing task", async () => {
   const result = await request("/api/tasks/missing/analyze", { method: "POST" });
   assert.equal(result.response.status, 404);
+});
+
+test("serves agent project artifacts and static entry file", async () => {
+  const id = `test-project-${Date.now()}`;
+  writeFileSync(join(projectDir(id), "index.html"), "<h1>ok</h1>");
+  const project = await request(`/api/projects/${id}`);
+  assert.equal(project.response.status, 200);
+  assert.equal(project.body.entry, "index.html");
+  assert.equal(project.body.files[0].path, "index.html");
+  const page = await fetch(`${baseUrl}/projects/${id}/`);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /ok/);
 });
 
 test("can fetch and cancel a task", async () => {

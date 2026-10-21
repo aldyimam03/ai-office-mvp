@@ -12,3 +12,6 @@ dist/
 server/data/*.sqlite
 server/data/*.sqlite-shm
 server/data/*.sqlite-wal
+server/workspace/
+
+./docs

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const HERMES_TIMEOUT = Number(process.env.HERMES_TIMEOUT_MS ?? 300_000);
+const HERMES_TIMEOUT = Number(process.env.HERMES_TIMEOUT_MS ?? 900_000);
 const HERMES_MAX_BUFFER = 4 * 1024 * 1024;
 
 export type HermesStatus = { configured: boolean; executable: string | null; mode: "read-only" | "not-configured" };
@@ -31,16 +31,22 @@ export async function askReadOnly(prompt: string): Promise<string> {
   return result.stdout.trim();
 }
 
-export async function delegateTask(slug: string, task: string): Promise<string> {
+export async function delegateTask(slug: string, task: string, cwd: string, files: string[] = []): Promise<string> {
   const prompt = [
     "Use the agency-agents-router plugin.",
     `Delegate to specialist slug: ${slug}.`,
     `Task: ${task}`,
-    "Return only the delegate result, tanpa preamble.",
+    `Working directory: ${cwd}`,
+    files.length > 0
+      ? `File yang sudah ada: ${files.slice(0, 40).join(", ")}`
+      : "Working directory masih kosong.",
+    "Simpan SEMUA file hasil kerja di dalam working directory itu, jangan di home directory. Hasil harus project nyata yang bisa dijalankan.",
+    "Balas daftar path file yang kamu buat atau ubah, tanpa preamble.",
   ].join("\n");
 
   const executable = process.env.HERMES_BIN ?? "hermes";
-  const args = ["-z", prompt];
+  // --in wajib: tanpa itu Hermes menulis ke cwd default pemanggil, bukan folder project.
+  const args = ["--in", cwd, "-z", prompt];
   if (process.env.HERMES_MODEL) args.push("--model", process.env.HERMES_MODEL);
   const result = await execFileAsync(executable, args, {
     timeout: HERMES_TIMEOUT,
