@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+// added state for modal
+
 import { Canvas, useFrame } from "@react-three/fiber";
 import { ContactShadows, Environment, OrbitControls, SoftShadows, Text } from "@react-three/drei";
 import { DoubleSide, Group, MeshStandardMaterial } from "three";
@@ -218,19 +220,19 @@ function Desk({ position, state }: { position: [number, number, number]; state: 
       </mesh>
 
       {/* Kursi kerja menghadap meja */}
-      <mesh position={[0, 0.02, 0.55]}>
+      <mesh position={[0, 0.12, 0.55]}>
         <cylinderGeometry args={[0.24, 0.24, 0.04, 16]} />
         <meshStandardMaterial color="#1f2937" roughness={0.6} metalness={0.3} />
       </mesh>
-      <mesh position={[0, 0.25, 0.55]}>
+      <mesh position={[0, 0.35, 0.55]}>
         <cylinderGeometry args={[0.035, 0.035, 0.42, 10]} />
         <meshStandardMaterial color="#374151" roughness={0.5} metalness={0.4} />
       </mesh>
-      <mesh position={[0, 0.47, 0.55]} castShadow>
+      <mesh position={[0, 0.57, 0.55]} castShadow>
         <boxGeometry args={[0.5, 0.06, 0.48]} />
         <meshStandardMaterial color="#475569" roughness={0.8} />
       </mesh>
-      <mesh position={[0, 0.74, 0.68]} castShadow>
+      <mesh position={[0, 0.84, 0.68]} castShadow>
         <boxGeometry args={[0.5, 0.48, 0.06]} />
         <meshStandardMaterial color="#475569" roughness={0.8} />
       </mesh>
@@ -351,6 +353,22 @@ export default function App() {
   const [formDescription, setFormDescription] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formMessage, setFormMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+
+  const deleteProject = async (taskId: string) => {
+    if (!confirm("Apakah Anda yakin ingin menghapus project ini beserta seluruh file karyanya?")) return;
+    setDeletingProjectId(taskId);
+    try {
+      const res = await fetch(`${API_URL}/projects/${taskId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Gagal menghapus project");
+      await Promise.all([loadTasks(), loadProjects(), loadEvents()]);
+    } catch (err: any) {
+      alert(err.message || "Gagal menghapus project");
+    } finally {
+      setDeletingProjectId(null);
+    }
+  };
 
   const loadEvents = useCallback(async () => {
     try {
@@ -440,7 +458,13 @@ export default function App() {
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(body.error ?? `Gagal menyimpan keputusan (${r.status})`);
-      await Promise.all([loadTasks(), loadApprovals(), loadEvents()]);
+      if (decision === "approved") {
+        const orch = await fetch(`${API_URL}/tasks/${approval.taskId}/orchestrate`, { method: "POST" });
+        if (!orch.ok) {
+          const err = await orch.json().catch(() => ({}));
+          console.error("Failed to orchestrate after approval", err);
+        }
+      }
     } catch (error) {
       setPanelMessage(error instanceof Error ? error.message : "Gagal menyimpan keputusan");
     } finally {
@@ -677,8 +701,14 @@ export default function App() {
 
         {meeting.active && <MeetingTable topic={meeting.topic} />}
 
-        {/* Papan tulis di belakang meja rapat, dengan coretan <Text> */}
-        <group position={[0, 0, MEETING_TABLE[2] + 2.0]}>
+        {/* Papan tulis di belakang meja rapat — klik untuk buka modal tambah tugas */}
+        <group
+          position={[0, 0, MEETING_TABLE[2] + 2.0]}
+          onClick={(e) => {
+            e.stopPropagation();
+            setIsModalOpen(true);
+          }}
+        >
           <mesh position={[0, 1.35, 0]} castShadow>
             <boxGeometry args={[3.2, 1.8, 0.05]} />
             <meshStandardMaterial color="#94a3b8" roughness={0.8} />
@@ -746,66 +776,83 @@ export default function App() {
       </Canvas>
 
       {/* Form input tugas: overlay kiri atas */}
-      <form
-        id="task-form"
-        onSubmit={submitTask}
-        style={{ ...OVERLAY_CARD, top: 16, left: 16, width: 300, padding: "14px 16px" }}
-      >
-        <h2 style={{ margin: "0 0 10px", fontSize: 15, letterSpacing: 0.3 }}>Kirim Tugas Baru</h2>
-        <label htmlFor="task-title" style={{ display: "block", fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>
-          JUDUL
-        </label>
-        <input
-          id="task-title"
-          value={formTitle}
-          onChange={(e) => setFormTitle(e.target.value)}
-          placeholder="Contoh: Rapikan halaman beranda"
-          style={{ ...INPUT_STYLE, marginBottom: 10 }}
-        />
-        <label htmlFor="task-description" style={{ display: "block", fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>
-          DESKRIPSI
-        </label>
-        <textarea
-          id="task-description"
-          value={formDescription}
-          onChange={(e) => setFormDescription(e.target.value)}
-          placeholder="Jelaskan tugas sedetail mungkin…"
-          rows={3}
-          style={{ ...INPUT_STYLE, marginBottom: 12, resize: "vertical", fontFamily: "inherit" }}
-        />
-        <button
-          id="submit-task"
-          type="submit"
-          disabled={isSubmitting}
-          style={{
-            width: "100%",
-            padding: "9px 12px",
-            borderRadius: 8,
-            border: "none",
-            background: "#2563eb",
-            color: "#ffffff",
-            fontWeight: 600,
-            fontSize: 13,
-            cursor: isSubmitting ? "not-allowed" : "pointer",
-            opacity: isSubmitting ? 0.55 : 1,
-          }}
-        >
-          {isSubmitting ? "Mengirim…" : "Kirim Tugas"}
-        </button>
-        {formMessage && (
-          <p
-            style={{
-              margin: "10px 0 0",
-              fontSize: 12,
-              color: formMessage.kind === "ok" ? "#4ade80" : "#f87171",
-            }}
-          >
-            {formMessage.text}
-          </p>
-        )}
-      </form>
+      // Removed top-left task form; task creation now via whiteboard modal.
 
-      {/* Panel Hasil Kerja: overlay kanan layar */}
+
+            {/* Modal tambah tugas: muncul dari klik papan tulis */}
+            {isModalOpen && (
+              <div
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  background: "rgba(2, 6, 23, 0.72)",
+                  backdropFilter: "blur(4px)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  zIndex: 50,
+                }}
+                onClick={() => setIsModalOpen(false)}
+              >
+                <div
+                  style={{
+                    ...OVERLAY_CARD,
+                    width: 360,
+                    padding: "18px 20px",
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <h2 style={{ margin: "0 0 12px", fontSize: 15, letterSpacing: 0.3 }}>Tugas Baru</h2>
+                  <form onSubmit={submitTask}>
+                    <label htmlFor="modal-task-title" style={{ display: "block", fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>
+                      JUDUL
+                    </label>
+                    <input
+                      id="modal-task-title"
+                      value={formTitle}
+                      onChange={(e) => setFormTitle(e.target.value)}
+                      placeholder="Contoh: Rapikan halaman beranda"
+                      style={{ ...INPUT_STYLE, marginBottom: 10 }}
+                      autoFocus
+                    />
+                    <label htmlFor="modal-task-description" style={{ display: "block", fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>
+                      DESKRIPSI
+                    </label>
+                    <textarea
+                      id="modal-task-description"
+                      value={formDescription}
+                      onChange={(e) => setFormDescription(e.target.value)}
+                      placeholder="Jelaskan tugas sedetail mungkin…"
+                      rows={3}
+                      style={{ ...INPUT_STYLE, marginBottom: 12, resize: "vertical", fontFamily: "inherit" }}
+                    />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => setIsModalOpen(false)}
+                        style={{ ...SMALL_BTN, flex: 1, background: "rgba(148, 163, 184, 0.15)", color: "#e2e8f0" }}
+                      >
+                        Batal
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSubmitting}
+                        style={{ ...SMALL_BTN, flex: 1, background: "#2563eb", color: "#ffffff", opacity: isSubmitting ? 0.55 : 1 }}
+                      >
+                        {isSubmitting ? "Mengirim…" : "Kirim"}
+                      </button>
+                    </div>
+                    {formMessage && (
+                      <p style={{ margin: "10px 0 0", fontSize: 12, color: formMessage.kind === "ok" ? "#4ade80" : "#f87171" }}>
+                        {formMessage.text}
+                      </p>
+                    )}
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* Panel Hasil Kerja: overlay kanan layar */}
       {panelOpen ? (
         <aside
           style={{
@@ -983,26 +1030,46 @@ export default function App() {
                         }}
                       >
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
-                          <span style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.3 }}>{root.title}</span>
-                          <span
-                            style={{
-                              color: rootColor,
-                              fontSize: 9,
-                              fontWeight: 800,
-                              textTransform: "uppercase",
-                              whiteSpace: "nowrap",
-                              letterSpacing: 0.4,
-                            }}
-                          >
-                            {rootLabel}
-                          </span>
-                        </div>
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94a3b8", marginTop: 3 }}>
-                          <span>
-                            {done}/{kids.length} langkah selesai{failed > 0 ? ` · ${failed} gagal` : ""}
-                          </span>
-                          <span>{pct}%</span>
-                        </div>
+                                                  <span style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.3 }}>{root.title}</span>
+                                                  <span
+                                                    style={{
+                                                      color: rootColor,
+                                                      fontSize: 9,
+                                                      fontWeight: 800,
+                                                      textTransform: "uppercase",
+                                                      whiteSpace: "nowrap",
+                                                      letterSpacing: 0.4,
+                                                    }}
+                                                  >
+                                                    {rootLabel}
+                                                  </span>
+                                                </div>
+                                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94a3b8", marginTop: 3, alignItems: "center" }}>
+                                                  <span>
+                                                    {done}/{kids.length} langkah selesai{failed > 0 ? ` · ${failed} gagal` : ""}
+                                                  </span>
+                                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                                    <span>{pct}%</span>
+                                                    <button
+                                                      type="button"
+                                                      disabled={deletingProjectId === root.id}
+                                                      onClick={() => void deleteProject(root.id)}
+                                                      title="Hapus project"
+                                                      style={{
+                                                        background: "rgba(239, 68, 68, 0.15)",
+                                                        border: "1px solid rgba(239, 68, 68, 0.4)",
+                                                        color: "#f87171",
+                                                        borderRadius: 4,
+                                                        padding: "2px 6px",
+                                                        fontSize: 10,
+                                                        cursor: "pointer",
+                                                        opacity: deletingProjectId === root.id ? 0.5 : 1,
+                                                      }}
+                                                    >
+                                                      {deletingProjectId === root.id ? "…" : "Hapus"}
+                                                    </button>
+                                                  </div>
+                                                </div>
                         <div style={{ height: 4, borderRadius: 2, background: "rgba(148, 163, 184, 0.22)", marginTop: 4, overflow: "hidden" }}>
                           <div
                             style={{
@@ -1177,11 +1244,6 @@ export default function App() {
               </div>
             </div>
           )}
-          {rootTasks.some((task) => childrenOf(task.id).length === 0) && (
-            <div style={{ fontSize: 10, fontWeight: 800, color: "#94a3b8", letterSpacing: 0.6, marginBottom: 6 }}>
-              TUGAS TANPA SUBTUGAS
-            </div>
-          )}
           <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
             {tasks
               .filter((task) => !task.parentTaskId && childrenOf(task.id).length === 0)
@@ -1327,6 +1389,23 @@ export default function App() {
                         {task.error}
                       </pre>
                     </details>
+                  )}
+                  {task.state === "failed" && (
+                    <button
+                      type="button"
+                      disabled={busyRetry === task.id}
+                      onClick={() => void retrySubtask(task)}
+                      style={{
+                        ...SMALL_BTN,
+                        background: "#b45309",
+                        marginTop: 5,
+                        padding: "3px 8px",
+                        fontSize: 10,
+                        opacity: busyRetry === task.id ? 0.6 : 1,
+                      }}
+                    >
+                      {busyRetry === task.id ? "Mengulang…" : "Coba lagi"}
+                    </button>
                   )}
                 </li>
               );

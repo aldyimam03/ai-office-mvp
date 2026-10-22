@@ -9,13 +9,13 @@ export const AGENT_OFFSET = { x: 0, z: 1 };
 
 // Tataletak inti 7 meja pertama (baris demi baris, menghadap +z).
 const DESK_LAYOUT: [number, number][] = [
-  [-3, -1],
-  [0, -1],
-  [3, -1],
-  [-3, 2],
-  [3, 2],
-  [-1.5, 3],
-  [1.5, 3],
+  [-4.5, -2],
+  [-1.5, -2],
+  [1.5, -2],
+  [4.5, -2],
+  [-3, 1.5],
+  [0, 1.5],
+  [3, 1.5],
 ];
 
 // Posisi meja ke-index. Aman untuk jumlah agen berapa pun: kelebihan agen
@@ -35,7 +35,11 @@ export function agentSpotAt(index: number): [number, number, number] {
 // Array default (kapasitas 7). Komponen scene memakai fungsi per-index di atas,
 // jadi bila AGENTS di App.tsx bertambah, meja & spot karakter ikut menyesuaikan.
 export const DESK_SPOTS: [number, number, number][] = Array.from({ length: 7 }, (_, i) => deskSpotAt(i));
-export const AGENT_SPOTS: [number, number, number][] = DESK_SPOTS.map((_, i) => agentSpotAt(i));
+export function chairSpotAt(index: number): [number, number, number] {
+  const desk = deskSpotAt(index);
+  // raise agent slightly above floor to avoid intersecting desk surface
+  return [desk[0] + 0, desk[1] + 0.2, desk[2] + 0.55];
+}
 
 export const MEETING_TABLE: [number, number, number] = [0, 0, 5.75];
 

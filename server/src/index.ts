@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { ActionRequest } from "./actions.js";
 import { askReadOnly, buildTaskPrompt, delegateTask, hermesStatus } from "./hermes.js";
 import { addDocument, searchDocuments } from "./knowledge.js";
-import { listProjects, projectDir, readProject, workspaceRoot } from "./projects.js";
+import { deleteProjectData, deleteProjectFolder, listProjects, projectDir, readProject, workspaceRoot } from "./projects.js";
 import { addEvent, decideApproval, failInterruptedTasks, getApproval, getTask, hasPendingApproval, insertApproval, insertTask, listEvents, listPendingApprovals, listTasks, updateTask } from "./db.js";
 
 export const app = express();
@@ -179,6 +179,12 @@ app.post("/api/tasks/:id/analyze", async (req, res) => {
 });
 app.get("/api/events", (_req, res) => res.json(listEvents()));
 app.get("/api/projects", (_req, res) => res.json(listProjects()));
+app.delete("/api/projects/:taskId", (req, res) => {
+  const { taskId } = req.params;
+  deleteProjectData(taskId);
+  deleteProjectFolder(taskId);
+  res.json({ ok: true, taskId });
+});
 app.get("/api/projects/:taskId", (req, res) => {
   const project = readProject(req.params.taskId);
   if (!project) return res.status(404).json({ error: "Project tidak ditemukan" });

@@ -2,7 +2,7 @@ import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import { Group } from "three";
 import { RoundedBox, Text } from "@react-three/drei";
-import { agentSpotAt, deskSpotAt, MEETING_SPOTS, MEETING_TABLE } from "../lib/layout";
+import { chairSpotAt, deskSpotAt, MEETING_SPOTS, MEETING_TABLE } from "../lib/layout";
 import type { AgentState } from "../state/useOfficeState";
 
 interface Props {
@@ -19,9 +19,10 @@ const STATUS_COLORS: Partial<Record<AgentState, string>> = {
   failed: "#ef4444",
 };
 
-// Pembobot animasi transisi antar-state (supaya tidak menyentak).
 interface AnimWeights {
   walk: number;
+  sit: number;
+  type: number;
   lean: number;
   headDown: number;
 }
@@ -35,14 +36,16 @@ export function AgentAvatar({ name, color, index, state }: Props) {
   const rightArm = useRef<Group>(null);
   const leftLeg = useRef<Group>(null);
   const rightLeg = useRef<Group>(null);
-  const anim = useRef<AnimWeights>({ walk: 0, lean: 0, headDown: 0 });
+  const anim = useRef<AnimWeights>({ walk: 0, sit: 0, type: 0, lean: 0, headDown: 0 });
 
-  // Posisi stabil per-index: berdiri di depan meja (bukan di tengahnya),
-  // atau duduk di cincin kursi rapat saat meeting.
   const deskAnchor = deskSpotAt(index);
-  const agentAnchor = agentSpotAt(index);
+  const chairAnchor = chairSpotAt(index);
   const meetingAnchor = MEETING_SPOTS[index % MEETING_SPOTS.length];
-  const target = state === "in_meeting" ? meetingAnchor : agentAnchor;
+
+  // Target spot:
+  // idle / done / working -> duduk di kursi kerja masing-masing (chairAnchor)
+  // in_meeting -> duduk di kursi rapat (meetingAnchor)
+  const target = state === "in_meeting" ? meetingAnchor : chairAnchor;
 
   useFrame(({ clock }) => {
     const group = root.current;
@@ -51,68 +54,85 @@ export function AgentAvatar({ name, color, index, state }: Props) {
     const dx = target[0] - group.position.x;
     const dz = target[2] - group.position.z;
     const distance = Math.hypot(dx, dz);
-    group.position.x += dx * 0.06;
-    group.position.z += dz * 0.06;
 
-    const moving = distance > 0.18;
+    // Gerak menuju spot
+    group.position.x += dx * 0.08;
+    group.position.z += dz * 0.08;
+
+    const moving = distance > 0.15;
+    const isSeated = !moving; // Jika tidak jalan, berarti duduk di kursi
+
     const t = clock.getElapsedTime();
     const w = anim.current;
+
     w.walk += ((moving ? 1 : 0) - w.walk) * 0.12;
+    w.sit += ((isSeated ? 1 : 0) - w.sit) * 0.12;
+    w.type += ((state === "working" && isSeated ? 1 : 0) - w.type) * 0.15;
     w.lean += ((state === "failed" ? 1 : 0) - w.lean) * 0.08;
     w.headDown += ((state === "failed" ? 1 : 0) - w.headDown) * 0.08;
 
-    // Orientasi: berjalan -> arah gerak; tiba di rapat -> menghadap tengah meja
-    // rapat; bekerja -> menghadap meja/monitor sendiri; selain itu menghadap kamera.
+    // Orientasi Rotasi
     let desiredYaw: number;
     if (moving) {
       desiredYaw = Math.atan2(dx, dz);
     } else if (state === "in_meeting") {
       desiredYaw = Math.atan2(MEETING_TABLE[0] - group.position.x, MEETING_TABLE[2] - group.position.z);
-    } else if (state === "working") {
-      desiredYaw = Math.atan2(deskAnchor[0] - group.position.x, deskAnchor[2] - group.position.z);
     } else {
-      desiredYaw = 0;
+      // Saat di meja sendiri, baik idle maupun working, menghadap ke meja (monitor)
+      desiredYaw = Math.atan2(deskAnchor[0] - group.position.x, deskAnchor[2] - group.position.z);
     }
     let delta = desiredYaw - group.rotation.y;
     delta = ((delta + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
-    group.rotation.y += delta * 0.09;
+    group.rotation.y += delta * 0.1;
 
-    // ---- Kaki: siklus langkah saat berpindah tempat ----
+    // Ketinggian tubuh saat duduk vs berdiri
+    // Kursi tinggi dudukan 0.47, tubuh duduk Y turun sedikit (-0.18)
+    const seatedYOffset = -0.18 * w.sit;
+
+    // ---- Kaki: melangkah vs tekuk 90 deg saat duduk ----
     const legSwing = Math.sin(t * 11) * 0.55 * w.walk;
-    if (leftLeg.current) leftLeg.current.rotation.x = legSwing;
-    if (rightLeg.current) rightLeg.current.rotation.x = -legSwing;
+    if (leftLeg.current) {
+      leftLeg.current.rotation.x = legSwing * (1 - w.sit) - (Math.PI / 2.2) * w.sit;
+    }
+    if (rightLeg.current) {
+      rightLeg.current.rotation.x = -legSwing * (1 - w.sit) - (Math.PI / 2.2) * w.sit;
+    }
 
-    // ---- Tangan: mengayun saat berjalan, mengetik saat bekerja, menggantung santai ----
+    // ---- Tangan: mengetik vs jalan vs santai ----
     if (leftArm.current && rightArm.current) {
-      if (w.walk > 0.05) {
+      if (w.walk > 0.1) {
         leftArm.current.rotation.x = -legSwing * 0.7;
         rightArm.current.rotation.x = legSwing * 0.7;
-      } else if (state === "working") {
-        const typeLeft = 0.9 + Math.sin(t * 10) * 0.35;
-        const typeRight = 0.9 + Math.sin(t * 10 + Math.PI) * 0.35;
-        leftArm.current.rotation.x += (typeLeft - leftArm.current.rotation.x) * 0.25;
-        rightArm.current.rotation.x += (typeRight - rightArm.current.rotation.x) * 0.25;
+      } else if (w.type > 0.05) {
+        const typeLeft = (0.85 + Math.sin(t * 12) * 0.25) * w.type;
+        const typeRight = (0.85 + Math.sin(t * 12 + Math.PI) * 0.25) * w.type;
+        leftArm.current.rotation.x = typeLeft;
+        rightArm.current.rotation.x = typeRight;
       } else {
-        leftArm.current.rotation.x += (-0.06 - leftArm.current.rotation.x) * 0.1;
-        rightArm.current.rotation.x += (-0.06 - rightArm.current.rotation.x) * 0.1;
+        // Tangan di atas paha / meja saat duduk santai
+        const restArm = 0.4 * w.sit;
+        leftArm.current.rotation.x += (restArm - leftArm.current.rotation.x) * 0.1;
+        rightArm.current.rotation.x += (restArm - rightArm.current.rotation.x) * 0.1;
       }
     }
 
-    // ---- Badan: napas idle, getaran kecil saat mengetik, membungkuk saat gagal ----
+    // ---- Badan & Torso ----
     if (torso.current) {
-      const breathing = state === "idle" || state === "done" ? Math.sin(t * 1.6) * 0.02 : 0;
-      const typingBob = state === "working" && !moving ? Math.sin(t * 10) * 0.008 : 0;
-      torso.current.position.y = breathing + typingBob;
-      torso.current.rotation.z = state === "working" && !moving ? Math.sin(t * 8) * 0.02 : 0;
-      torso.current.rotation.x = w.lean * 0.18;
+      const breathing = Math.sin(t * 1.8) * 0.015;
+      const typingBob = w.type > 0.1 ? Math.sin(t * 10) * 0.006 : 0;
+      torso.current.position.y = seatedYOffset + breathing + typingBob;
+      torso.current.rotation.z = w.type > 0.1 ? Math.sin(t * 8) * 0.015 : 0;
+      torso.current.rotation.x = w.lean * 0.18 + 0.05 * w.sit; // sedikit condong ke depan saat duduk
     }
 
-    // Kepala menunduk frustrasi.
-    if (head.current) head.current.rotation.x = w.headDown * 0.5;
+    // Kepala
+    if (head.current) {
+      head.current.rotation.x = w.headDown * 0.5 + (w.type > 0.1 ? 0.12 : 0);
+    }
 
-    // Mata berkedip sesekali.
+    // Mata berkedip
     if (eyes.current) {
-      eyes.current.scale.y = Math.abs(Math.sin(t * 0.9)) < 0.06 ? 0.12 : 1;
+      eyes.current.scale.y = Math.abs(Math.sin(t * 0.8)) < 0.05 ? 0.12 : 1;
     }
   });
 
@@ -120,100 +140,115 @@ export function AgentAvatar({ name, color, index, state }: Props) {
 
   return (
     <group ref={root}>
-      {/* Kaki: pivot di pinggul supaya bisa melangkah */}
+      {/* Kaki: pivot di pinggul */}
       <group ref={leftLeg} position={[-0.14, 0.36, 0]}>
         <mesh position={[0, -0.18, 0]} castShadow>
           <cylinderGeometry args={[0.07, 0.07, 0.36, 12]} />
-          <meshStandardMaterial color="#64748b" roughness={0.7} />
+          <meshStandardMaterial color="#475569" roughness={0.7} />
         </mesh>
         <mesh position={[0, -0.33, 0.03]}>
           <boxGeometry args={[0.16, 0.06, 0.24]} />
-          <meshStandardMaterial color="#334155" roughness={0.8} />
+          <meshStandardMaterial color="#1e293b" roughness={0.8} />
         </mesh>
       </group>
       <group ref={rightLeg} position={[0.14, 0.36, 0]}>
         <mesh position={[0, -0.18, 0]} castShadow>
           <cylinderGeometry args={[0.07, 0.07, 0.36, 12]} />
-          <meshStandardMaterial color="#64748b" roughness={0.7} />
+          <meshStandardMaterial color="#475569" roughness={0.7} />
         </mesh>
         <mesh position={[0, -0.33, 0.03]}>
           <boxGeometry args={[0.16, 0.06, 0.24]} />
-          <meshStandardMaterial color="#334155" roughness={0.8} />
+          <meshStandardMaterial color="#1e293b" roughness={0.8} />
         </mesh>
       </group>
 
-      {/* Torso: badan + lengan + kepala (ikut bernapas & membungkuk) */}
+      {/* Torso */}
       <group ref={torso}>
-        <RoundedBox args={[0.6, 0.72, 0.42]} radius={0.09} smoothness={4} position={[0, 0.66, 0]} castShadow>
-          <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.16} roughness={0.6} />
+        {/* Bodi robot melengkung & bertekstur modern */}
+        <RoundedBox args={[0.62, 0.72, 0.42]} radius={0.1} smoothness={4} position={[0, 0.66, 0]} castShadow>
+          <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.2} roughness={0.4} metalness={0.2} />
         </RoundedBox>
 
-        {/* Tangan: pivot di bahu */}
-        <group ref={leftArm} position={[-0.37, 0.92, 0]}>
+        {/* Badge / Panel dada metalik */}
+        <mesh position={[0, 0.72, 0.22]}>
+          <planeGeometry args={[0.3, 0.2]} />
+          <meshStandardMaterial color="#0f172a" roughness={0.3} metalness={0.8} />
+        </mesh>
+
+        {/* Lengan */}
+        <group ref={leftArm} position={[-0.38, 0.92, 0]}>
           <mesh position={[0, -0.2, 0]} castShadow>
             <cylinderGeometry args={[0.055, 0.055, 0.4, 12]} />
-            <meshStandardMaterial color="#94a3b8" roughness={0.6} />
+            <meshStandardMaterial color="#94a3b8" roughness={0.5} metalness={0.3} />
           </mesh>
           <mesh position={[0, -0.43, 0]}>
-            <sphereGeometry args={[0.06, 12, 12]} />
-            <meshStandardMaterial color="#cbd5e1" roughness={0.5} />
+            <sphereGeometry args={[0.065, 12, 12]} />
+            <meshStandardMaterial color="#e2e8f0" roughness={0.4} />
           </mesh>
         </group>
-        <group ref={rightArm} position={[0.37, 0.92, 0]}>
+        <group ref={rightArm} position={[0.38, 0.92, 0]}>
           <mesh position={[0, -0.2, 0]} castShadow>
             <cylinderGeometry args={[0.055, 0.055, 0.4, 12]} />
-            <meshStandardMaterial color="#94a3b8" roughness={0.6} />
+            <meshStandardMaterial color="#94a3b8" roughness={0.5} metalness={0.3} />
           </mesh>
           <mesh position={[0, -0.43, 0]}>
-            <sphereGeometry args={[0.06, 12, 12]} />
-            <meshStandardMaterial color="#cbd5e1" roughness={0.5} />
+            <sphereGeometry args={[0.065, 12, 12]} />
+            <meshStandardMaterial color="#e2e8f0" roughness={0.4} />
           </mesh>
         </group>
 
         {/* Leher */}
         <mesh position={[0, 1.06, 0]}>
           <cylinderGeometry args={[0.08, 0.08, 0.1, 12]} />
-          <meshStandardMaterial color="#64748b" roughness={0.7} />
+          <meshStandardMaterial color="#475569" roughness={0.6} />
         </mesh>
 
-        {/* Kepala: pivot di leher supaya bisa menunduk */}
+        {/* Kepala */}
         <group ref={head} position={[0, 1.06, 0]}>
-          <mesh position={[0, 0.3, 0]} castShadow>
-            <sphereGeometry args={[0.3, 24, 24]} />
-            <meshStandardMaterial color="#e2e8f0" roughness={0.35} metalness={0.15} />
+          <mesh position={[0, 0.32, 0]} castShadow>
+            <sphereGeometry args={[0.31, 24, 24]} />
+            <meshStandardMaterial color="#f8fafc" roughness={0.25} metalness={0.2} />
           </mesh>
-          {/* Dua mata hitam kecil (gruppenya dipakai untuk berkedip) */}
-          <group ref={eyes} position={[0, 0.34, 0.26]}>
-            <mesh position={[-0.11, 0, 0]}>
-              <sphereGeometry args={[0.05, 12, 12]} />
-              <meshStandardMaterial color="#0f172a" roughness={0.3} />
+
+          {/* Visor / Kaca muka futuristik */}
+          <mesh position={[0, 0.33, 0.18]} rotation={[0.1, 0, 0]}>
+            <cylinderGeometry args={[0.22, 0.24, 0.18, 16, 1, false, -Math.PI / 2, Math.PI]} />
+            <meshStandardMaterial color="#020617" roughness={0.1} metalness={0.9} />
+          </mesh>
+
+          {/* Mata bercahaya di balik visor */}
+          <group ref={eyes} position={[0, 0.34, 0.32]}>
+            <mesh position={[-0.1, 0, 0]}>
+              <sphereGeometry args={[0.045, 12, 12]} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2.5} />
             </mesh>
-            <mesh position={[0.11, 0, 0]}>
-              <sphereGeometry args={[0.05, 12, 12]} />
-              <meshStandardMaterial color="#0f172a" roughness={0.3} />
+            <mesh position={[0.1, 0, 0]}>
+              <sphereGeometry args={[0.045, 12, 12]} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2.5} />
             </mesh>
           </group>
-          {/* Antena menyala senada warna agen */}
-          <mesh position={[0, 0.68, 0]}>
+
+          {/* Antena */}
+          <mesh position={[0, 0.7, 0]}>
             <cylinderGeometry args={[0.018, 0.018, 0.16, 8]} />
-            <meshStandardMaterial color="#94a3b8" roughness={0.6} />
+            <meshStandardMaterial color="#64748b" roughness={0.5} />
           </mesh>
-          <mesh position={[0, 0.78, 0]}>
-            <sphereGeometry args={[0.05, 12, 12]} />
-            <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1.6} />
+          <mesh position={[0, 0.8, 0]}>
+            <sphereGeometry args={[0.055, 12, 12]} />
+            <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2.0} />
           </mesh>
         </group>
       </group>
 
-      <Text position={[0, 2.05, 0]} fontSize={0.14} color="white" anchorX="center">
+      <Text position={[0, 2.1, 0]} fontSize={0.14} color="#f8fafc" anchorX="center">
         {name}
       </Text>
 
       {/* Indikator status di atas kepala */}
       {statusColor && (
-        <mesh position={[0, 2.28, 0]}>
-          <boxGeometry args={[0.14, 0.14, 0.14]} />
-          <meshStandardMaterial color={statusColor} emissive={statusColor} emissiveIntensity={2} />
+        <mesh position={[0, 2.32, 0]}>
+          <boxGeometry args={[0.13, 0.13, 0.13]} />
+          <meshStandardMaterial color={statusColor} emissive={statusColor} emissiveIntensity={2.2} />
         </mesh>
       )}
     </group>
