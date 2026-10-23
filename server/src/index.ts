@@ -4,10 +4,15 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { ActionRequest } from "./actions.js";
-import { askReadOnly, buildTaskPrompt, delegateTask, hermesStatus } from "./hermes.js";
+import { AGENTS, findAgent } from "./agents.js";
+import { authEnabled, isLoopbackHost, requireToken } from "./auth.js";
+import { askReadOnly, buildTaskPrompt, hermesStatus } from "./hermes.js";
 import { addDocument, searchDocuments } from "./knowledge.js";
-import { deleteProjectData, deleteProjectFolder, listProjects, projectDir, readProject, workspaceRoot } from "./projects.js";
-import { addEvent, decideApproval, failInterruptedTasks, getApproval, getTask, hasPendingApproval, insertApproval, insertTask, listEvents, listPendingApprovals, listTasks, updateTask } from "./db.js";
+import { deleteProjectData, deleteProjectFolder, listProjects, readProject } from "./projects.js";
+import { createArtifactApp, resolveArtifactHost, resolveArtifactPort } from "./artifacts.js";
+import { decideApproval, failInterruptedTasks, getApproval, getTask, hasActiveSubtasks, hasPendingApproval, insertApproval, insertTask, listEvents, listEventsSince, listPendingApprovals, listTasks, updateTask } from "./db.js";
+import { record } from "./events.js";
+import { delegateSubtask, startOrchestration } from "./orchestrator.js";
 
 export const app = express();
 const host = process.env.HOST ?? "127.0.0.1";
@@ -16,143 +21,51 @@ const corsOrigins = (process.env.CORS_ORIGINS ?? "").split(",").map(value => val
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be valid");
 if (corsOrigins.length === 0) throw new Error("CORS_ORIGINS must contain at least one origin");
 if (!host.trim()) throw new Error("HOST must not be empty");
+// Tanpa token, API hanya boleh hidup di loopback. CORS bukan autentikasi: `curl` tembus.
+if (!authEnabled() && !isLoopbackHost(host)) throw new Error("AI_OFFICE_TOKEN wajib diisi bila HOST bukan loopback");
 
-// Versi lokal. Jangan ikat ke 0.0.0.0 sebelum autentikasi tersedia.
+// Versi lokal. Tanpa AI_OFFICE_TOKEN, API hanya boleh hidup di loopback.
 app.use(cors({ origin: corsOrigins }));
 app.use(express.json({ limit: "1mb" }));
+app.use("/api", requireToken);
 
-type AgentState = "idle" | "working" | "waiting_approval" | "offline";
-type Agent = {
-  id: string;
-  name: string;
-  role: string;
-  agencySlug: string;
-  personality: string;
-  catchphrase: string;
-  specialty: string;
-  color: string;
-  state: AgentState;
-  taskId?: string;
-};
+const agents = AGENTS;
 
-// Character layer maps visible employees to Agency Agents specialists.
-const agents: Agent[] = [
-  { id: "manager", name: "Mara Sol", role: "project manager", agencySlug: "senior-project-manager", personality: "tenang, tegas, menjaga pekerjaan tetap bergerak", catchphrase: "Satu langkah berikutnya yang jelas.", specialty: "mengubah tujuan yang kacau menjadi antrean kerja", color: "#e8b86c", state: "idle" },
-  { id: "backend", name: "Bram Forge", role: "backend architect", agencySlug: "backend-architect", personality: "metodis, defensif, terobsesi pada batas sistem", catchphrase: "Buat kegagalan jadi biasa.", specialty: "API, kontrak data, dan layanan andal", color: "#6fa8dc", state: "idle" },
-  { id: "frontend", name: "Nia Pixel", role: "frontend developer", agencySlug: "frontend-developer", personality: "presisi, cepat, mengutamakan pengguna", catchphrase: "Kalau terasa lambat, berarti lambat.", specialty: "antarmuka React responsif dan alur aksesibel", color: "#72d6c1", state: "idle" },
-  { id: "designer", name: "Luma Vale", role: "UI/UX designer", agencySlug: "ui-designer", personality: "ingin tahu, hangat, tegas soal kejelasan", catchphrase: "Hapus satu hal lagi.", specialty: "sistem visual, interaksi, dan kejelasan produk", color: "#c59be8", state: "idle" },
-  { id: "reviewer", name: "Vera Check", role: "code reviewer", agencySlug: "code-reviewer", personality: "baik, skeptis, berbasis bukti", catchphrase: "Tunjukkan kasus tepinya.", specialty: "menemukan risiko, menjaga kualitas, dan keyakinan rilis", color: "#f28f8f", state: "idle" },
-];
+app.get("/api/health", async (_req, res) => res.json({ ok: true, service: "ai-office-server", persistence: "sqlite", auth: authEnabled() ? "token" : "off", hermes: await hermesStatus() }));
+app.get("/api/agents", (_req, res) => {
+  // State diturunkan dari task yang sedang berjalan, bukan field mutable di memori
+  // yang hanya berubah lewat endpoint demo.
+  const active = new Set(listTasks().filter(task => task.state === "in_progress").map(task => task.specialist));
+  res.json(agents.map(agent => ({ ...agent, state: active.has(agent.slug) ? "working" : "idle" })));
+});
 
-app.get("/api/health", async (_req, res) => res.json({ ok: true, service: "ai-office-server", persistence: "sqlite", hermes: await hermesStatus() }));
-app.get("/api/agents", (_req, res) => res.json(agents));
+// Polling inkremental: satu request menggantikan empat (tasks, approvals, events).
+app.get("/api/state", (req, res) => {
+  const since = z.string().datetime().optional().safeParse(req.query.since);
+  if (!since.success) return res.status(400).json({ error: "since harus ISO datetime" });
+  res.json({
+    serverTime: new Date().toISOString(),
+    tasks: listTasks(),
+    approvals: listPendingApprovals(),
+    events: listEventsSince(since.data),
+  });
+});
 app.get("/api/tasks", (_req, res) => res.json(listTasks()));
 app.get("/api/tasks/:id", (req, res) => { const task = getTask(req.params.id); if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" }); res.json(task); });
 app.get("/api/tasks/:id/events", (req, res) => res.json(listEvents(req.params.id)));
 
-const ALLOWED_SLUGS = [
-  "senior-project-manager",
-  "backend-architect",
-  "frontend-developer",
-  "ui-designer",
-  "code-reviewer",
-  "copywriter",
-  "seo-specialist",
-];
-
-// Satu subtugas = satu delegasi Hermes di folder project induk. Dipakai orkestrasi
-// dan tombol "Coba lagi" supaya jalur sukses/gagal tidak terduplikasi.
-async function delegateSubtask(subtaskId: string, slug: string, description: string, projectTaskId: string) {
-  updateTask(subtaskId, "in_progress");
-  try {
-    const existing = readProject(projectTaskId)?.files.map(file => file.path) ?? [];
-    const result = await delegateTask(slug, description, projectDir(projectTaskId), existing);
-    updateTask(subtaskId, "completed");
-    record("task.completed", subtaskId, { specialist: slug, result });
-    return { subtaskId, slug, result };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown";
-    updateTask(subtaskId, "failed", message);
-    record("task.failed", subtaskId, { specialist: slug, error: message });
-    return { subtaskId, slug, error: message };
-  }
-}
-
 app.post("/api/tasks/:id/orchestrate", (req, res) => {
   const task = getTask(req.params.id);
   if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" });
+  if (task.parentTaskId) return res.status(409).json({ error: "Subtugas tidak bisa di-orchestrate" });
+  if (task.state !== "queued") return res.status(409).json({ error: `Hanya tugas berstatus queued yang bisa di-orchestrate (sekarang ${task.state})` });
+  if (hasActiveSubtasks(task.id)) return res.status(409).json({ error: "Masih ada subtugas berjalan untuk tugas ini" });
 
-  void (async () => {
-    const planPrompt = `
-Kamu adalah senior project manager. Pecah tugas berikut menjadi subtugas.
-Setiap subtugas harus punya "slug" dari daftar ini:
-${ALLOWED_SLUGS.join(", ")}.
-
-Kembalikan HANYA JSON valid, tanpa markdown:
-{
-  "subtasks": [
-    { "slug": "frontend-developer", "task": "deskripsi tugas konkret" }
-  ],
-  "meeting": { "needed": true, "topic": "topik diskusi" }
-}
-
-Judul: ${task.title}
-Deskripsi: ${task.description}
-  `.trim();
-
-    try {
-      const raw = await askReadOnly(planPrompt);
-      const plan: {
-        subtasks: { slug: string; task: string }[];
-        meeting?: { needed: boolean; topic: string };
-      } = JSON.parse(raw.replace(/```json|```/g, "").trim());
-
-      const invalid = plan.subtasks.filter((sub) => !ALLOWED_SLUGS.includes(sub.slug));
-      if (invalid.length > 0) {
-        updateTask(task.id, "failed", "Slug tidak valid");
-        record("task.failed", task.id, { error: "Slug tidak valid", invalid });
-        return;
-      }
-
-      record("orchestration.started", task.id, { plan });
-      const results: { subtaskId: string; slug: string; result?: string; error?: string }[] = [];
-
-      for (const sub of plan.subtasks) {
-        const subtaskId = randomUUID();
-        insertTask({
-          id: subtaskId,
-          title: sub.task,
-          description: sub.task,
-          specialist: sub.slug,
-          parentTaskId: task.id,
-          state: "queued",
-          createdAt: new Date().toISOString(),
-        });
-        record("task.delegated", subtaskId, { parentTaskId: task.id, specialist: sub.slug });
-        results.push(await delegateSubtask(subtaskId, sub.slug, sub.task, task.id));
-      }
-
-      if (plan.meeting?.needed) {
-        record("meeting.started", task.id, {
-          topic: plan.meeting.topic,
-          participants: plan.subtasks.map((sub) => sub.slug),
-        });
-        // Rapat dianggap selesai di akhir orkestrasi; tanpa ini UI menampilkan
-        // agen "berdiskusi" selamanya walau semua langkah sudah selesai/gagal.
-        record("meeting.ended", task.id, { topic: plan.meeting.topic });
-      }
-
-      record("orchestration.completed", task.id, { results, projectUrl: `/projects/${task.id}/` });
-      updateTask(task.id, "completed");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "unknown";
-      updateTask(task.id, "failed", message);
-      record("orchestration.failed", task.id, { error: message });
-      record("task.failed", task.id, { error: message });
-    }
-  })();
-
-  res.status(202).json({ ok: true, message: "Orkestrasi dimulai di background" });
+  // Ditandai sinkron sebelum kerja async dimulai: tanpa ini dua POST beruntun
+  // sama-sama lolos guard dan rencananya dijalankan dua kali.
+  const started = updateTask(task.id, "in_progress");
+  void startOrchestration(task);
+  res.status(202).json({ ok: true, task: started, message: "Orkestrasi dimulai di background" });
 });
 
 app.post("/api/tasks/:id/meeting/end", (req, res) => {
@@ -181,17 +94,19 @@ app.get("/api/events", (_req, res) => res.json(listEvents()));
 app.get("/api/projects", (_req, res) => res.json(listProjects()));
 app.delete("/api/projects/:taskId", (req, res) => {
   const { taskId } = req.params;
-  deleteProjectData(taskId);
+  // Cek keberadaan task dulu: tanpa ini, id sembarang tetap membalas 200 dan
+  // folder apa pun yang namanya cocok ikut terhapus.
+  const removed = deleteProjectData(taskId);
+  if (removed === 0) return res.status(404).json({ error: "Project tidak ditemukan" });
   deleteProjectFolder(taskId);
-  res.json({ ok: true, taskId });
+  record("project.deleted", taskId, { tasks: removed });
+  res.json({ ok: true, taskId, tasks: removed });
 });
 app.get("/api/projects/:taskId", (req, res) => {
   const project = readProject(req.params.taskId);
   if (!project) return res.status(404).json({ error: "Project tidak ditemukan" });
   res.json(project);
 });
-// Hasil kerja agent bisa langsung dibuka di browser: /projects/<taskId>/
-app.use("/projects", express.static(workspaceRoot, { index: "index.html" }));
 app.post("/api/events/meeting/start", (req, res) => {
   const parsed = z.object({
     topic: z.string().trim().min(1).max(200),
@@ -205,17 +120,16 @@ app.post("/api/events/meeting/start", (req, res) => {
 app.get("/api/approvals", (_req, res) => res.json(listPendingApprovals()));
 app.get("/api/knowledge/search", (req, res) => {
   const query = z.string().trim().min(2).max(200).safeParse(req.query.q);
-  const owner = z.string().trim().min(1).max(100).safeParse(req.query.owner ?? "local");
-  if (!query.success || !owner.success) return res.status(400).json({ error: "q and owner are required" });
-  res.json(searchDocuments(query.data, owner.data));
+  if (!query.success) return res.status(400).json({ error: "q wajib diisi (2-200 karakter)" });
+  // Owner tidak diambil dari query: pemanggil tidak boleh memilih arsip siapa yang dibaca.
+  res.json(searchDocuments(query.data));
 });
 app.post("/api/knowledge/documents", (req, res) => {
-  const parsed = z.object({ title: z.string().trim().min(1).max(200), content: z.string().min(1).max(100000), owner: z.string().trim().min(1).max(100).default("local") }).safeParse(req.body);
+  const parsed = z.object({ title: z.string().trim().min(1).max(200), content: z.string().min(1).max(100000) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid document", details: parsed.error.flatten() });
-  res.status(201).json(addDocument(parsed.data.title, parsed.data.content, parsed.data.owner));
+  res.status(201).json(addDocument(parsed.data.title, parsed.data.content));
 });
 
-function record(type: string, taskId: string | undefined, payload: unknown) { addEvent({ id: randomUUID(), taskId, type, payload }); }
 
 const TaskInput = z.object({
   title: z.string().trim().min(3).max(160),
@@ -231,21 +145,24 @@ app.post("/api/tasks", (req, res) => {
   res.status(201).json(task);
 });
 
+// Endpoint demo memalsukan penyelesaian task tanpa menjalankan agen; hanya untuk dev.
+// Dibaca per request (bukan saat modul dimuat) supaya bisa diuji dan dimatikan tanpa restart.
+function demoEnabled(): boolean {
+  return process.env.AI_OFFICE_ENABLE_DEMO === "1";
+}
+
 app.post("/api/tasks/:id/demo-run", (req, res) => {
+  if (!demoEnabled()) return res.status(404).json({ error: "Endpoint demo nonaktif (set AI_OFFICE_ENABLE_DEMO=1)" });
   const task = getTask(req.params.id);
-  const agent = agents.find(item => item.agencySlug === task?.specialist);
   if (!task) return res.status(404).json({ error: "Tugas tidak ditemukan" });
+  const agent = findAgent(task.specialist);
   if (!agent) return res.status(400).json({ error: "Specialist Agency Agents tidak ditemukan" });
   if (task.state !== "queued") return res.status(409).json({ error: "Hanya tugas menunggu yang dapat dijalankan" });
-  agent.state = "working";
-  agent.taskId = task.id;
   const started = updateTask(task.id, "in_progress");
-  record("task.demo_started", task.id, { specialist: agent.agencySlug });
+  record("task.demo_started", task.id, { specialist: agent.slug });
   setTimeout(() => {
-    agent.state = "idle";
-    delete agent.taskId;
     updateTask(task.id, "completed");
-    record("task.demo_completed", task.id, { specialist: agent.agencySlug });
+    record("task.demo_completed", task.id, { specialist: agent.slug });
   }, 8000);
   res.status(202).json(started);
 });
@@ -295,16 +212,33 @@ app.post("/api/approvals/:id/decision", (req, res) => {
   if (!approval) return res.status(404).json({ error: "Persetujuan tidak ditemukan" });
   if (approval.status !== "pending") return res.status(409).json({ error: "Persetujuan sudah diputuskan" });
   const decided = decideApproval(approval.id, decision.data.decision);
+
+  // Orkestrasi dijalankan di server, bukan oleh frontend: klien lain (curl, mobile)
+  // tidak boleh tertinggal di state queued hanya karena tidak memanggil /orchestrate.
   const task = getTask(approval.taskId);
-  if (task) updateTask(task.id, decision.data.decision === "approved" ? "queued" : "failed");
-  record("approval.decided", approval.taskId, { approvalId: approval.id, decision: decision.data.decision });
-  res.json({ approval: decided, task: getTask(approval.taskId), execution: "not-configured" });
+  let orchestration: "started" | "skipped" = "skipped";
+  if (task) {
+    const approved = decision.data.decision === "approved";
+    const updated = updateTask(task.id, approved ? "queued" : "failed");
+    if (approved && updated && !updated.parentTaskId && !hasActiveSubtasks(updated.id)) {
+      updateTask(updated.id, "in_progress");
+      void startOrchestration(updated);
+      orchestration = "started";
+    }
+  }
+  record("approval.decided", approval.taskId, { approvalId: approval.id, decision: decision.data.decision, orchestration });
+  res.json({ approval: decided, task: getTask(approval.taskId), orchestration, execution: "not-configured" });
 });
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const interrupted = failInterruptedTasks();
   if (interrupted > 0) console.log(`[ai-office] ${interrupted} subtugas ditandai gagal: server restart saat masih berjalan`);
+  const artifactHost = resolveArtifactHost();
+  const artifactPort = resolveArtifactPort(port);
   app.listen(port, host, () => {
     console.log(`AI Office API listening on http://${host}:${port}`);
+  });
+  createArtifactApp().listen(artifactPort, artifactHost, () => {
+    console.log(`AI Office artifacts listening on http://${artifactHost}:${artifactPort}/projects/<taskId>/`);
   });
 }

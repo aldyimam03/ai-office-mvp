@@ -29,7 +29,13 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+  CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL,
+    owner TEXT NOT NULL, created_at TEXT NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
+  CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
+  CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner);
 `);
 for (const column of [
   "ALTER TABLE tasks ADD COLUMN parent_task_id TEXT",
@@ -50,10 +56,36 @@ export function updateTask(id: string, state: TaskState, error?: string): Task |
 export function listPendingApprovals(): Approval[] { return db.prepare("SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at DESC").all().map(approval); }
 export function getApproval(id: string): Approval | undefined { const row = db.prepare("SELECT * FROM approvals WHERE id = ?").get(id); return row ? approval(row) : undefined; }
 export function hasPendingApproval(taskId: string): boolean { return Boolean(db.prepare("SELECT 1 FROM approvals WHERE task_id = ? AND status = 'pending'").get(taskId)); }
+// Subtugas yang masih berjalan = orkestrasi lain sedang aktif untuk induk ini.
+export function hasActiveSubtasks(parentTaskId: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM tasks WHERE parent_task_id = ? AND state IN ('queued','in_progress') LIMIT 1").get(parentTaskId));
+}
 export function insertApproval(input: Omit<Approval, "decidedAt"> & { action?: ProposedAction }): Approval { db.prepare("INSERT INTO approvals (id,task_id,summary,action_json,status,created_at,decided_at) VALUES (?,?,?,?,?,?,NULL)").run(input.id, input.taskId, input.summary, input.action ? JSON.stringify(input.action) : null, input.status, input.createdAt); return getApproval(input.id)!; }
 export function decideApproval(id: string, status: ApprovalStatus): Approval | undefined { db.prepare("UPDATE approvals SET status = ?, decided_at = ? WHERE id = ? AND status = 'pending'").run(status, new Date().toISOString(), id); return getApproval(id); }
 export function addEvent(input: Omit<Event, "createdAt">): Event { const createdAt = new Date().toISOString(); db.prepare("INSERT INTO events (id,task_id,type,payload,created_at) VALUES (?,?,?,?,?)").run(input.id, input.taskId ?? null, input.type, JSON.stringify(input.payload), createdAt); return { ...input, createdAt }; }
-export function listEvents(taskId?: string): Event[] { const rows = taskId ? db.prepare("SELECT * FROM events WHERE task_id = ? ORDER BY created_at ASC").all(taskId) : db.prepare("SELECT * FROM events ORDER BY created_at DESC").all(); return rows.map(row => ({ id: String(row.id), ...(row.task_id ? { taskId: String(row.task_id) } : {}), type: String(row.type), payload: JSON.parse(String(row.payload)), createdAt: String(row.created_at) })); }
+function event(row: Record<string, unknown>): Event {
+  return { id: String(row.id), ...(row.task_id ? { taskId: String(row.task_id) } : {}), type: String(row.type), payload: JSON.parse(String(row.payload)), createdAt: String(row.created_at) };
+}
+
+// Tanpa LIMIT, endpoint ini mengembalikan seluruh riwayat dan tumbuh selamanya —
+// klien memanggilnya tiap 2 detik, jadi biayanya naik terus seiring waktu.
+export const EVENT_PAGE_LIMIT = 500;
+
+export function listEvents(taskId?: string): Event[] {
+  const rows = taskId
+    ? db.prepare("SELECT * FROM events WHERE task_id = ? ORDER BY created_at DESC LIMIT ?").all(taskId, EVENT_PAGE_LIMIT).reverse()
+    : db.prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ?").all(EVENT_PAGE_LIMIT).reverse();
+  return rows.map(event);
+}
+
+// Polling inkremental: hanya event sejak `since`. Pakai >= (bukan >) supaya event
+// pada milidetik yang sama tidak terlewat; klien dedupe berdasarkan id.
+export function listEventsSince(since?: string): Event[] {
+  const rows = since
+    ? db.prepare("SELECT * FROM events WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?").all(since, EVENT_PAGE_LIMIT).reverse()
+    : db.prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ?").all(EVENT_PAGE_LIMIT).reverse();
+  return rows.map(event);
+}
 
 // Restart server membunuh promise orchestrator di tengah jalan; tanpa sapuan ini baris
 // in_progress menggantung selamanya karena tidak ada proses yang tersisa untuk menutupnya.
